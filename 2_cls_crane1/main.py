@@ -44,7 +44,8 @@ class GaussianModel():
         p = self.kl_divergence(m, s, self.all_mean, self.all_std)
         if p > 1:
             p = 1
-        return p
+        print('test ok?')
+        return p+100
         
     def kl_divergence(self, m1, s1, m2, s2):
         return (m1 - m2)**2 + np.log(s2/s1) + (s1**2 + (m1 - m2)**2)/(2*(s2**2)) - 0.5
