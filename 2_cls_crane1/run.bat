@@ -1,0 +1,1 @@
+nsml run -d 2_cls_crane1 -g 1 --memory 24G --shm-size 16G --cpus 4

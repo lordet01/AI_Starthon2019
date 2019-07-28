@@ -3,9 +3,9 @@
 from distutils.core import setup
 
 setup(
-    name='Crane1_NSML_Baseline',
+    name='Crane1_NSML_kmjeon',
     version='1',
-    description='Crane1_NSML_Baseline',
-    install_requires=[
+    description='Crane1_NSML_kmjeon',
+    install_requires=['h5py'
     ]
 )
