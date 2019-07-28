@@ -5,10 +5,11 @@ import numpy as np
 import glob
 import argparse
 
-from nnet_model import model_unet
+from nnet_model import model_unet, model_cnn_vae
 from data_gen_func import DataGenerator
 import parameters as param
 from keras.models import load_model
+from data_process import feat_proc, collect_test_outputs
 
 def bind_model(model):
 	def save(dir_name):
@@ -25,75 +26,26 @@ def bind_model(model):
 	# DONOTCHANGE: They are reserved for nsml
 	nsml.bind(save=save, load=load, infer=infer)
 
-
-def collect_test_outputs(_data_gen_test, _data_out, quick_test):
-	# Collecting ground truth for test data
-	nb_batch = 2 if quick_test else _data_gen_test.get_total_batches()
-
-	batch_size = _data_out[0][0]
-	y = np.zeros((nb_batch * batch_size, _data_out[0][1], _data_out[0][2], _data_out[0][3]))
-	y_hat = np.zeros((nb_batch * batch_size, _data_out[0][1], _data_out[0][2], _data_out[0][3]))
-
-	print("nb_batch in test: {}".format(nb_batch))
-	cnt = 0
-	for oracle_in, oracle_out in _data_gen_test.generate(is_eval=True):
-		y[cnt * batch_size:(cnt + 1) * batch_size, :, :] = oracle_in
-		y_hat[cnt * batch_size:(cnt + 1) * batch_size, :, :] = oracle_out
-		cnt = cnt + 1
-		if cnt == nb_batch:
-			break
-	return y, y_hat
-
-def feat_proc(in1, feat_len):
-
-	in1 = np.concatenate([in1, np.zeros((in1.shape[0], feat_len-in1.shape[1]))+1e-6],axis=-1)
-
-	t_all, k = in1.shape
-	t = param.timestep
-	if t_all < t:
-		in1 = in1 / np.max(in1)
-	else:
-		in1 =  in1[:int(t_all/t)*t,:]
-		in1_bat = np.reshape(in1, (int(t_all/t),t,k))
-
-
-		nb_batch = in1_bat.shape[0]
-		for b in range(nb_batch):
-			norm_scale = np.max(in1_bat[b,:,:])
-			in1_bat[b,:,:] = in1_bat[b,:,:] / norm_scale
-
-	in1 = np.reshape(in1_bat,(*in1_bat.shape,1))
-	return in1
-
 class GaussianModel():
 	
 	def __init__(self):
 		self.all_mean = 0
 		self.all_std = 1
 		
-	def train(self, train_file_list):
-		data_list = [np.load(file).flatten() for file in train_file_list]
-		all_data = np.concatenate(data_list)
-		self.all_mean = all_data.mean()
-		self.all_std = all_data.std()
+	def train(self, mean_normal, var_normal):
+		self.all_mean = mean_normal
+		self.all_std = var_normal
 	
-	def forward(self, data):
-		# data : numpy matrix of shape (T * F ) where T is time and F is frequency
-		# F = 500, T is not fixed
-		m = data.mean()
-		s = data.std()
-		
+	def forward(self, m, s):
 		p = self.kl_divergence(m, s, self.all_mean, self.all_std)
 		if p > 1:
 			p = 1
 		return p
 		
 	def kl_divergence(self, m1, s1, m2, s2):
-		return (m1 - m2)**2 + np.log(s2/s1) + (s1**2 + (m1 - m2)**2)/(2*(s2**2)) - 0.5
+		return np.mean((m1 - m2)**2 + np.log(s2/s1) + (s1**2 + (m1 - m2)**2)/(2*(s2**2)) - 0.5)
 	
-
 	
-
 if __name__ == '__main__':
 	
 	args = argparse.ArgumentParser()
@@ -108,7 +60,6 @@ if __name__ == '__main__':
 	
 	
 	# Bind model
-	###model = GaussianModel()
 	###bind_model(model)
 	
 	
@@ -117,8 +68,12 @@ if __name__ == '__main__':
 	if config.pause:
 		nsml.paused(scope=locals())
 	
-	TRAIN = 1
+	TRAIN = 0
 	TEST = 1
+	
+	#[model, encoder, decoder] = model_unet((param.timestep, param.feat_len, 1), param.batch_size)
+	[model, encoder, decoder] = model_cnn_vae((param.timestep, param.feat_len, 1), param.batch_size)
+	model_Gaussian = GaussianModel()
 
 	if TRAIN:
 		# Load data
@@ -128,13 +83,6 @@ if __name__ == '__main__':
 											n_channels=1, shuffle=True, per_file=False, is_eval=False)
 		valid_gen_val = DataGenerator(train_dataset_path, batch_size=param.batch_size,seq_len=param.timestep, feat_len=param.feat_len,
 											n_channels=1, shuffle=False, per_file=False, is_eval=True)
-
-		# Load data generator for testing
-		_, data_out = train_gen_val.get_data_sizes()
-		y_oracle, y_hat = collect_test_outputs(valid_gen_val, data_out, param.quick_test)
-
-		# Load model
-		[model, encoder, decoder] = model_unet((param.timestep, param.feat_len, 1), param.batch_size)
 
 		best_mae_metric = 99999
 		best_epoch = -1
@@ -156,58 +104,44 @@ if __name__ == '__main__':
 				epochs=param.epochs_per_fit,
 				verbose=1
 			)
-			tr_loss[epoch_cnt] = hist.history.get('loss')[-1]
-			val_loss[epoch_cnt] = hist.history.get('val_loss')[-1]
+			encoder.save(param.PATH_MODEL_CHECKPOINT) 
+
+		#Get Normal GMM
+		enc_out = encoder.predict_generator(
+			generator=valid_gen_val.generate(is_eval=True),
+			steps=2 if param.quick_test else valid_gen_val.get_total_batches(),
+			verbose=1
+		)
+		z_mean = enc_out[0]
+		z_logvar = enc_out[1]
+		mean_normal = np.mean(z_mean,axis=0)
+		std_normal = np.sqrt(np.mean(np.exp(z_logvar) + np.power(z_mean - mean_normal,2),axis=0))
+		model_Gaussian.train(mean_normal,std_normal)
 		
-			# predict once per epoch
-			out_val = model.predict_generator(
-				generator=valid_gen_val.generate(is_eval=True),
-				steps=2 if param.quick_test else valid_gen_val.get_total_batches(),
-				verbose=1
-			)
-			y_h = out_val
-
-			# Calculate the metrics
-			mae_metric[epoch_cnt, 0] = np.mean(np.abs(y_h - y_oracle))
-			print('===Validation metric(y) : {} ==='.format(np.mean(np.abs(y_h - y_oracle))))
-
-			#Visualize intermediate results in spectrogram
-			#wavPlot.spectrogram_batch(y_oracle,'figs/{}y'.format(epoch_cnt))
-			#wavPlot.spectrogram_batch(y_h,'figs/{}x_h'.format(epoch_cnt))
-			print('==={}-th epoch figure was saved==='.format(epoch_cnt))
-
-			## Visualize the metrics with respect to param.epochs_per_fit
-			#plot_functions(unique_name, tr_loss, val_loss, sed_metric, doa_metric, seld_metric)
-		
-			patience_cnt += 1
-			if np.mean(mae_metric[epoch_cnt,:],axis=-1) < best_mae_metric:
-				best_mae_metric = np.mean(mae_metric[epoch_cnt,:],axis=-1)
-				best_epoch = epoch_cnt
-				model.save(param.PATH_MODEL_CHECKPOINT)   
-				patience_cnt = 0
-		
-			print(
-					'best_epoch : %d\n' %
-				(
-					best_epoch
-				)
-			)
-
-			if patience_cnt == param.patient:
-				print('patient level reached. finishing training...')
-				break
-	
 	if TEST:
-		model = load_model('model/model.h5')
+		encoder = load_model(param.PATH_MODEL_CHECKPOINT, compile=False)
 		
 		#train_dataset_path = DATASET_PATH + '/train/train_data'
 		train_dataset_path = '../sample_data/2_cls_crane_a_samples'
 		train_data_files = sorted(glob.glob(train_dataset_path + '/*.npy')) 
-		for file in train_data_files[:10]:
-			y_in = feat_proc(np.load(file), param.feat_len)
-			y_h = model.predict(y_in)
-			dist = np.mean(np.abs(y_h - y_in))
+		file_cnt = 0
+		for file in train_data_files:
+			data = np.load(file)
+
+			#Simulate anomality by mixing noise
+			if file_cnt < int(len(train_data_files)*0.5):
+				noise = np.abs(np.random.rand((*data.shape))) * np.max(data) #make atypical scenarios
+				data = data + noise
+
+			y_in = feat_proc(data, param.feat_len)
+			enc_out = encoder.predict(y_in)
+			z_mean = enc_out[0]
+			z_logvar = enc_out[1]
+			mean_now = np.mean(z_mean,axis=0)
+			std_now = np.sqrt(np.mean(np.exp(z_logvar) + np.power(z_mean - mean_now,2),axis=0))
+			dist = model_Gaussian.forward(mean_now,std_now)
 			print(dist)
+			file_cnt += 1
 
 
 	### Save

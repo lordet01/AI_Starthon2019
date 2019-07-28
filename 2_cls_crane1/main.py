@@ -5,64 +5,66 @@ import numpy as np
 import glob
 import argparse
 import os
-from nnet_model import model_unet
+from nnet_model import model_cnn_vae
 from data_gen_func import DataGenerator
 import parameters as param
-##import wavPlot
 from keras.models import load_model
 from data_process import feat_proc, collect_test_outputs
 
-def bind_model(model):
+def bind_model(model_vae_encoder, model_Gaussian):
 	def save(path):
-		model.save(os.path.join(path, 'model.h5')) 
-		print('----model saved----')
+		model_vae_encoder.save(os.path.join(path, 'model_vae_encoder.h5'))
+		print('----model (vae encoder) saved----')
+		np.save(path + '/params.npy', np.array([model_Gaussian.all_mean, model_Gaussian.all_std]))
+		print('----model (Gaussian) saved----')
 
 	def load(path):
-		model = load_model(os.path.join(path, 'model.h5'))
-		print('----model loaded----')
-		return model
+		model_vae_encoder = load_model(os.path.join(path, 'model_vae_encoder.h5'), compile=False)
+		print('----model (vae encoder) saved----')
+
+		params = np.load(path + '/params.npy')
+		model_Gaussian.all_mean = params[0]
+		model_Gaussian.all_std = params[1]
+		print('----model (Gaussian) saved----')
+		return model_vae_encoder
 
 	def infer(data):
-		return inference(model, data, config)
+		return inference(model_vae_encoder, model_Gaussian, data, config)
 
 	# DONOTCHANGE: They are reserved for nsml
 	nsml.bind(save=save, load=load, infer=infer)
 
-
-def inference(model, data, config):
+def inference(encoder, model_Gaussian, data, config):
+	##noise = np.abs(np.random.rand((*data.shape)))## * np.max(data) #make atypical scenarios
+	##data = data + noise
 	y_in = feat_proc(data, param.feat_len)
-	y_h = model.predict(y_in)
-	dist = np.mean(np.abs(y_h - y_in))
+	enc_out = encoder.predict(y_in)
+	z_mean = enc_out[0]
+	z_logvar = enc_out[1]
+	mean_now = np.mean(z_mean,axis=0)
+	std_now = np.sqrt(np.mean(np.exp(z_logvar) + np.power(z_mean - mean_now,2),axis=0))
+	dist = model_Gaussian.forward(mean_now,std_now)
 	print(dist)
 	return dist
 
+class GaussianModel():
 	
-##class GaussianModel():
-##	
-##	def __init__(self):
-##		self.all_mean = 0
-##		self.all_std = 1
-##		
-##	def train(self, train_file_list):
-##		data_list = [np.load(file).flatten() for file in train_file_list]
-##		all_data = np.concatenate(data_list)
-##		self.all_mean = all_data.mean()
-##		self.all_std = all_data.std()
-##	
-##	def forward(self, data):
-##		# data : numpy matrix of shape (T * F ) where T is time and F is frequency
-##		# F = 500, T is not fixed
-##		m = data.mean()
-##		s = data.std()
-##		
-##		p = self.kl_divergence(m, s, self.all_mean, self.all_std)
-##		if p > 1:
-##			p = 1
-##		return p
-##		
-##	def kl_divergence(self, m1, s1, m2, s2):
-##		return (m1 - m2)**2 + np.log(s2/s1) + (s1**2 + (m1 - m2)**2)/(2*(s2**2)) - 0.5
+	def __init__(self):
+		self.all_mean = 0
+		self.all_std = 1
+		
+	def train(self, mean_normal, var_normal):
+		self.all_mean = mean_normal
+		self.all_std = var_normal
 	
+	def forward(self, m, s):
+		p = self.kl_divergence(m, s, self.all_mean, self.all_std)
+		if p > 1:
+			p = 1
+		return p
+		
+	def kl_divergence(self, m1, s1, m2, s2):
+		return np.mean((m1 - m2)**2 + np.log(s2/s1) + (s1**2 + (m1 - m2)**2)/(2*(s2**2)) - 0.5)
 
 if __name__ == '__main__':
 	
@@ -78,8 +80,10 @@ if __name__ == '__main__':
 	
 	
 	# Bind model
-	[model, encoder, decoder] = model_unet((param.timestep, param.feat_len, 1), param.batch_size)
-	bind_model(model)
+	[model, encoder, decoder] = model_cnn_vae((param.timestep, param.feat_len, 1), param.batch_size)
+	model_Gaussian = GaussianModel()
+	
+	bind_model(encoder, model_Gaussian)
 	
 	
 	# DONOTCHANGE: They are reserved for nsml
@@ -97,25 +101,14 @@ if __name__ == '__main__':
 		valid_gen_val = DataGenerator(train_dataset_path, batch_size=param.batch_size,seq_len=param.timestep, feat_len=param.feat_len,
 											n_channels=1, shuffle=False, per_file=False, is_eval=True)
 
-		# Load data generator for testing
-		_, data_out = train_gen_val.get_data_sizes()
-		y_oracle, y_hat = collect_test_outputs(valid_gen_val, data_out, param.quick_test)
-
-		# Load model
-		[model, encoder, decoder] = model_unet((param.timestep, param.feat_len, 1), param.batch_size)
-
+		# start training
 		best_mae_metric = 99999
 		best_epoch = -1
 		patience_cnt = 0
-		tr_loss = np.zeros(param.nb_epochs)
-		val_loss = np.zeros(param.nb_epochs)
-		mae_metric = np.zeros((param.nb_epochs, 2))
 		nb_epoch = 2 if param.quick_test else param.nb_epochs
 
-		# start training
+		# train once per epoch
 		for epoch_cnt in range(nb_epoch):
-		
-			# train once per epoch
 			hist = model.fit_generator(
 				generator=train_gen_val.generate(is_eval=False),
 				steps_per_epoch=2 if param.quick_test else train_gen_val.get_total_batches(),
@@ -124,46 +117,18 @@ if __name__ == '__main__':
 				epochs=param.epochs_per_fit,
 				verbose=1
 			)
-			tr_loss[epoch_cnt] = hist.history.get('loss')[-1]
-			val_loss[epoch_cnt] = hist.history.get('val_loss')[-1]
-		
-			# predict once per epoch
-			out_val = model.predict_generator(
-				generator=valid_gen_val.generate(is_eval=True),
-				steps=2 if param.quick_test else valid_gen_val.get_total_batches(),
-				verbose=1
-			)
-			y_h = out_val
+			nsml.save(epoch_cnt) # If you are using neural networks, you may want to use epoch as checkpoints 
 
-			# Calculate the metrics
-			mae_metric[epoch_cnt, 0] = np.mean(np.abs(y_h - y_oracle))
-			print('===Validation metric(y) : {} ==='.format(np.mean(np.abs(y_h - y_oracle))))
-
-			patience_cnt += 1
-			if np.mean(mae_metric[epoch_cnt,:],axis=-1) < best_mae_metric:
-				best_mae_metric = np.mean(mae_metric[epoch_cnt,:],axis=-1)
-				best_epoch = epoch_cnt
-				nsml.save(1) # If you are using neural networks, you may want to use epoch as checkpoints
-				patience_cnt = 0
-		
-			print(
-					'best_epoch : %d\n' %
-				(
-					best_epoch
-				)
-			)
-
-			if patience_cnt == param.patient:
-				print('patient level reached. finishing training...')
-				break
-	
-			
-	### Load test (Check if load method works well)
-	##nsml.load(epoch)
-	
-	### Infer test
-	##for file in train_data_files[:10]:
-	##	data = np.load(file)
-	##	print(model.forward(data))
+		#Get Normal GMM
+		enc_out = encoder.predict_generator(
+			generator=valid_gen_val.generate(is_eval=True),
+			steps=2 if param.quick_test else valid_gen_val.get_total_batches(),
+			verbose=1)	
+		z_mean = enc_out[0]
+		z_logvar = enc_out[1]
+		mean_normal = np.mean(z_mean,axis=0)
+		std_normal = np.sqrt(np.mean(np.exp(z_logvar) + np.power(z_mean - mean_normal,2),axis=0))
+		model_Gaussian.train(mean_normal,std_normal)
+					
 
 
