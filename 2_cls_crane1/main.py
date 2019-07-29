@@ -11,39 +11,36 @@ import parameters as param
 from keras.models import load_model
 from data_process import feat_proc, collect_test_outputs
 
-def bind_model(model_vae_encoder, model_Gaussian):
+def bind_model(model_vae):
 	def save(path):
-		model_vae_encoder.save(os.path.join(path, 'model_vae_encoder.h5'))
-		print('----model (vae encoder) saved----')
-		np.save(path + '/params.npy', np.array([model_Gaussian.all_mean, model_Gaussian.all_std]))
-		print('----model (Gaussian) saved----')
+		model_vae.save(os.path.join(path, 'model_vae.h5'))
+		print('----model (vae) saved----')
 
 	def load(path):
-		model_vae_encoder = load_model(os.path.join(path, 'model_vae_encoder.h5'), compile=False)
-		print('----model (vae encoder) saved----')
-
-		params = np.load(path + '/params.npy')
-		model_Gaussian.all_mean = params[0]
-		model_Gaussian.all_std = params[1]
-		print('----model (Gaussian) saved----')
-		return model_vae_encoder
+		model_vae = load_model(os.path.join(path, 'model_vae.h5'), compile=False)
+		print('----model (vae) loaded----')
+		return model_vae
 
 	def infer(data):
-		return inference(model_vae_encoder, model_Gaussian, data, config)
+		return inference(model_vae, data, config)
 
 	# DONOTCHANGE: They are reserved for nsml
 	nsml.bind(save=save, load=load, infer=infer)
 
-def inference(encoder, model_Gaussian, data, config):
+def inference(model, data, config):
 	##noise = np.abs(np.random.rand((*data.shape)))## * np.max(data) #make atypical scenarios
 	##data = data + noise
 	y_in = feat_proc(data, param.feat_len)
-	enc_out = encoder.predict(y_in)
-	z_mean = enc_out[0]
-	z_logvar = enc_out[1]
-	mean_now = np.mean(z_mean,axis=0)
-	std_now = np.sqrt(np.mean(np.exp(z_logvar) + np.power(z_mean - mean_now,2),axis=0))
-	dist = model_Gaussian.forward(mean_now,std_now)
+	y_hat = model.predict(y_in)
+	norm_val = np.mean(np.abs(y_in[:,:,:500,:] + y_hat[:,:,:500,:]))
+	dist = np.abs(y_in - y_hat)
+	dist = np.mean(dist[:,:,:500,:]) / norm_val
+	##enc_out = encoder.predict(y_in)
+	##z_mean = enc_out[0]
+	##z_logvar = enc_out[1]
+	##mean_now = np.mean(z_mean,axis=0)
+	##std_now = np.sqrt(np.mean(np.exp(z_logvar) + np.power(z_mean - mean_now,2),axis=0))
+	##dist = model_Gaussian.forward(mean_now,std_now)
 	print(dist)
 	return dist
 
@@ -59,7 +56,7 @@ class GaussianModel():
 	
 	def forward(self, m, s):
 		p = self.kl_divergence(m, s, self.all_mean, self.all_std)
-		if p > 1:
+		if p > 1.0:
 			p = 1
 		return p
 		
@@ -83,7 +80,7 @@ if __name__ == '__main__':
 	[model, encoder, decoder] = model_cnn_vae((param.timestep, param.feat_len, 1), param.batch_size)
 	model_Gaussian = GaussianModel()
 	
-	bind_model(encoder, model_Gaussian)
+	bind_model(model)
 	
 	
 	# DONOTCHANGE: They are reserved for nsml
@@ -119,16 +116,16 @@ if __name__ == '__main__':
 			)
 			nsml.save(epoch_cnt) # If you are using neural networks, you may want to use epoch as checkpoints 
 
-		#Get Normal GMM
-		enc_out = encoder.predict_generator(
-			generator=valid_gen_val.generate(is_eval=True),
-			steps=2 if param.quick_test else valid_gen_val.get_total_batches(),
-			verbose=1)	
-		z_mean = enc_out[0]
-		z_logvar = enc_out[1]
-		mean_normal = np.mean(z_mean,axis=0)
-		std_normal = np.sqrt(np.mean(np.exp(z_logvar) + np.power(z_mean - mean_normal,2),axis=0))
-		model_Gaussian.train(mean_normal,std_normal)
+		####Get Normal GMM
+		###enc_out = encoder.predict_generator(
+		###	generator=valid_gen_val.generate(is_eval=True),
+		###	steps=2 if param.quick_test else valid_gen_val.get_total_batches(),
+		###	verbose=1)	
+		###z_mean = enc_out[0]
+		###z_logvar = enc_out[1]
+		###mean_normal = np.mean(z_mean,axis=0)
+		###std_normal = np.sqrt(np.mean(np.exp(z_logvar) + np.power(z_mean - mean_normal,2),axis=0))
+		###model_Gaussian.train(mean_normal,std_normal)
 					
 
 

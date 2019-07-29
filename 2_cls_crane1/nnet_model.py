@@ -124,7 +124,6 @@ def model_cnn_vae(input_shape, BATCH_SIZE):
 
 	
 	#----U-net Decoder----
-	d_y = Input(shape=(t,k,1)) #(B,t=8,f=k, c=1)
 	d_z = Input(shape=(latent_dim,), name='z_sampling')
 	
 
@@ -146,17 +145,16 @@ def model_cnn_vae(input_shape, BATCH_SIZE):
 	conc4 = deconv4
 	deconv5 = deconv_bat_relu(conc4, 16, (5,5), 2)
 	conc5 = deconv5
-	irm_y = Conv2DTranspose(filters=1, kernel_size=4, strides=2, padding='same', activation='sigmoid')(conc5)
-	irm_y = Lambda(lambda x:x[:,:,:k])(irm_y)
-	y_hat = multiply([irm_y, d_y])
+	y_hat = Conv2DTranspose(filters=1, kernel_size=4, strides=2, padding='same', activation='sigmoid')(conc5)
+	y_hat = Lambda(lambda x:x[:,:,:k])(y_hat)
 
 	#U-net Decoder
-	decoder = Model([d_y, d_z], y_hat, name = 'Dec_outs')
+	decoder = Model(d_z, y_hat, name = 'Dec_outs')
 	decoder.summary()
 	#plot_model(TAUnet_decoder, to_file='model/Unet_decoder.png', show_shapes=True)
 	#U-net Model
 	enc_outs = encoder(y)
-	dec_out = decoder([y, enc_outs[2]])
+	dec_out = decoder(enc_outs[2])
 	y_hat_m = Reshape((t,k,1), name='Out_y_hat')(dec_out)
 	
 	model = Model(y, y_hat_m, name='Unet_vae')

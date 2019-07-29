@@ -46,11 +46,19 @@ class SimpleMLP(nn.Module):
         super(SimpleMLP, self).__init__()
         self.config = config
         self.linear1 = nn.Linear(config.input_dim, config.hidden_dim)
+        self.lstm = nn.LSTM(input_size = config.hidden_dim,
+                           hidden_size = config.hidden_dim,
+                           num_layers = 3,
+                           batch_first = True,
+                           dropout = 0.1,
+                           bidirectional = True)
         self.linear2 = nn.Linear(config.hidden_dim, config.output_dim)
+
 
     def forward(self, x):
         h = self.linear1(x)
-        out = self.linear2(h)
+        h2 = self.lstm(h,128)
+        out = self.linear2(h2)
         return out
     
 class CraneDatasetB(Dataset):
